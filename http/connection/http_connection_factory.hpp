@@ -1,14 +1,17 @@
 #ifndef WFX_HTTP_CONNECTION_FACTORY_HPP
 #define WFX_HTTP_CONNECTION_FACTORY_HPP
 
-// This is simply a helper thingy which will abstract the 'selecting'-
-// -of OS specific functionality for connection handling
 #include "http_connection.hpp"
 #include <memory>
 
-#ifdef _WIN32
+// OS-specific includes
+#if defined(_WIN32)
     #include "os_specific/windows/iocp_connection.hpp"
-#else
+
+#elif defined(__APPLE__)
+    #include "os_specific/macos/kqueue_connection.hpp"
+
+#elif defined(__linux__)
     #ifdef WFX_LINUX_USE_IO_URING
         #include "os_specific/linux/io_uring_connection.hpp"
     #else
@@ -21,14 +24,22 @@ namespace WFX::Http {
 // Factory function that returns the correct handler
 inline std::unique_ptr<HttpConnectionHandler> CreateConnectionHandler(bool useHttps)
 {
-#ifdef _WIN32
+#if defined(_WIN32)
+
     return std::make_unique<WFX::OSSpecific::IocpConnectionHandler>();
-#else
+
+#elif defined(__APPLE__)
+
+    return std::make_unique<WFX::OSSpecific::KqueueConnectionHandler>(useHttps);
+
+#elif defined(__linux__)
+
     #ifdef WFX_LINUX_USE_IO_URING
-        return std::make_unique<WFX::OSSpecific::IoUringConnectionHandler>();
+        return std::make_unique<WFX::OSSpecific::IoUringConnectionHandler>(useHttps);
     #else
         return std::make_unique<WFX::OSSpecific::EpollConnectionHandler>(useHttps);
     #endif
+
 #endif
 }
 

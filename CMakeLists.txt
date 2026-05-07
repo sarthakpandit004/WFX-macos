@@ -114,8 +114,11 @@ target_compile_options(wfx PRIVATE
 
 target_link_options(wfx PRIVATE
     # Release (GCC / Clang / AppleClang / Intel)
-    $<$<AND:$<CONFIG:Release>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:IntelLLVM>>>:
+   $<$<AND:$<CONFIG:Release>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:IntelLLVM>>>:
         -Wl,--gc-sections -Wl,--as-needed -Wl,-s -flto=auto
+    >
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:AppleClang>>:
+        -Wl,-dead_strip -flto=auto
     >
 
     # Release (MSVC)
@@ -152,7 +155,12 @@ target_link_libraries(wfx PRIVATE
 file(GLOB_RECURSE WFX_UTILS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/utils/*.cpp")
 filter_sources_by_os(WFX_UTILS_SOURCES)
 
+
 add_library(wfxutils SHARED ${WFX_UTILS_SOURCES})
+ #changed for mac
+target_sources(wfxutils PRIVATE
+    utils/fileops/linux/filemanip.cpp
+)
 
 target_include_directories(wfxutils PUBLIC
     ${CMAKE_SOURCE_DIR}

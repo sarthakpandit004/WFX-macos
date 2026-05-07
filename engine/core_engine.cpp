@@ -1,5 +1,5 @@
 #include "core_engine.hpp"
-
+#include <dlfcn.h>
 #include "http/response.hpp"
 #include "http/common/http_error_msgs.hpp"
 #include "http/formatters/parser/http_parser.hpp"

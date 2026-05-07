@@ -7,6 +7,9 @@
     #include <unistd.h>
     #include <sys/wait.h>
     #include <cerrno>
+    #if defined(__APPLE__)
+        extern char** environ;
+    #endif
 #endif
 
 namespace WFX::Utils {

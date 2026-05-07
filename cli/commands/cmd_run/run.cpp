@@ -1,3 +1,6 @@
+#include <unistd.h>
+#include <sys/types.h>
+#include <signal.h>
 #include "run.hpp"
 
 #include "cli/commands/common/common.hpp"
@@ -13,7 +16,7 @@
 #ifdef _WIN32
     #include <windows.h>
 #else
-    #include <wait.h>
+    #include <sys/wait.h>
     #include <signal.h>
 #endif
 
@@ -94,7 +97,13 @@ int RunServer(const std::string& project, const ServerConfig& cfg)
     logger.SetLevelMask(WFX_LOG_INFO | WFX_LOG_WARNINGS);
 
     // -------------------- WORKERS SPAWNING PHASE --------------------
-    const std::string dllDir = buildConfig.buildDir + "/user_entry.so";
+    //changes for mac
+    #if defined(__APPLE__)
+         const std::string dllDir = buildConfig.buildDir + "/user_entry.dylib";
+    #else
+        const std::string dllDir = buildConfig.buildDir + "/user_entry.so";
+    #endif
+
     for(int i = 0; i < osConfig.workerProcesses; i++) {
         pid_t pid = fork();
 

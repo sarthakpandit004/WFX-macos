@@ -103,11 +103,13 @@ HttpParseState Parse(ConnectionContext* ctx)
 
             // Data should be fetched all at once
             if(hasContentLengthHeader) {
-                std::size_t contentLen = 0;
-                // Malformed Content-Length
-                if(!StrToUInt64(contentLengthHeader, contentLen))
+                std::uint64_t tempLen = 0;
+
+                // Malformed Content-Length.   // macos changes
+                if(!StrToUInt64(contentLengthHeader, tempLen))
                     return HttpParseState::PARSE_ERROR;
 
+                std::size_t contentLen = static_cast<std::size_t>(tempLen);
                 // Sanity check: are we about to exceed our max buffer size or max body size?
                 // If so, reject oversized payload
                 if(

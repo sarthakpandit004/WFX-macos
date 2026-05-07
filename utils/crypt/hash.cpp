@@ -178,11 +178,21 @@ bool RandomPool::RefillBytes()
 #if defined(_WIN32)
     if(BCryptGenRandom(nullptr, randomPool_, static_cast<ULONG>(BUFFER_SIZE), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
         return false;
+#elif defined(__APPLE__)
+    // getentropy is limited to 256 bytes per call on macOS
+    std::size_t totalRead = 0;
+    while(totalRead < BUFFER_SIZE) {
+        std::size_t chunk = std::min(BUFFER_SIZE - totalRead, std::size_t(256));
+        if(getentropy(randomPool_ + totalRead, chunk) != 0)
+            return false;
+        totalRead += chunk;
+    }
+    //changed apple here 
 #else
     ssize_t totalRead = 0;
-
     while(totalRead < BUFFER_SIZE) {
         ssize_t n = getrandom(randomPool_ + totalRead, BUFFER_SIZE - totalRead, 0);
+
         if(n < 0) {
             if(errno == ENOSYS) {
                 // Fallback to /dev/urandom

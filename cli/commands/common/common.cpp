@@ -1,5 +1,6 @@
 #include "common.hpp"
-
+#include <signal.h>
+#include <unistd.h>
 #include "config/config.hpp"
 #include "engine/core_engine.hpp"
 #include "http/common/http_global_state.hpp"
@@ -121,6 +122,7 @@ LONG WINAPI ExceptionFilter(EXCEPTION_POINTERS* ep) {
     return EXCEPTION_EXECUTE_HANDLER;
 }
 #else
+
 void HandleMasterSignal(int)
 {
     auto& globalState = GetGlobalState();
@@ -129,7 +131,7 @@ void HandleMasterSignal(int)
     Logger::GetInstance().Info("[WFX-Master]: Ctrl+C pressed, shutting down workers...");
 
     if(globalState.workerPGID > 0)
-        kill(-globalState.workerPGID, SIGTERM); // Broadcast SIGTERM to all workers
+        kill(-globalState.workerPGID, SIGTERM);
 }
 
 void HandleWorkerSignal(int)
@@ -137,7 +139,6 @@ void HandleWorkerSignal(int)
     auto& globalState = GetGlobalState();
     globalState.shouldStop = true;
     
-    // Stop is atomic, its safe to call it in signal handler
     if(globalState.enginePtr) {
         globalState.enginePtr->Stop();
         globalState.enginePtr = nullptr;
@@ -145,10 +146,12 @@ void HandleWorkerSignal(int)
 }
 
 void PinWorkerToCPU(int workerIndex) {
+#if defined(__linux__)
+
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     
-    int cpu = workerIndex % sysconf(_SC_NPROCESSORS_ONLN); // Round-Robin
+    int cpu = workerIndex % sysconf(_SC_NPROCESSORS_ONLN);
     
     CPU_SET(cpu, &cpuset);
 
@@ -156,7 +159,12 @@ void PinWorkerToCPU(int workerIndex) {
         Logger::GetInstance().Error("[WFX-Master]: Failed to pin worker ", workerIndex, " to CPU");
 
     Logger::GetInstance().Info("[WFX-Master]: Worker ", workerIndex, " pinned to CPU ", cpu);
-}
+
+#else
+    (void)workerIndex;
 #endif
+}
+
+#endif  
 
 } // namespace WFX::CLI

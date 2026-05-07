@@ -1,6 +1,6 @@
 #ifndef WFX_HTTP_SSL_HPP
 #define WFX_HTTP_SSL_HPP
-
+#include <cstddef>
 // Windows socket is diferent from Linux's socket definiton
 // I have it defined in connection/http_connection.hpp but doing it here-
 // -again, not the best way to do it but, yeah

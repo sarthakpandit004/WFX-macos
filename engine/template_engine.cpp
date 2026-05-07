@@ -1,5 +1,5 @@
 #include "template_engine.hpp"
-
+#include <dlfcn.h>
 #include "config/config.hpp"
 #include "utils/fileops/filemeta.hpp"
 #include "utils/backport/string.hpp"

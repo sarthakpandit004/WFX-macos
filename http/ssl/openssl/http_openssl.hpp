@@ -1,5 +1,5 @@
 #ifdef WFX_HTTP_USE_OPENSSL
-
+#include <cstddef>
 #ifndef WFX_HTTP_OPENSSL_HPP
 #define WFX_HTTP_OPENSSL_HPP
 
