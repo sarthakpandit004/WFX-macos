@@ -86,19 +86,25 @@ void Config::LoadCoreSettings(std::string_view path)
                          osSpecificConfig.workerThreadCount, defaultIOCP, threadCount);
         ExtractAutoOrAll(tbl, "Windows", "request_threads",
                          osSpecificConfig.callbackThreadCount, defaultUser, threadCount);
+    #elif defined(__APPLE__)
+        // macOS — reads from [MacOS] and [MacOS.Kqueue] sections
+        ExtractValue(tbl, "MacOS", "worker_processes",        osSpecificConfig.workerProcesses);
+        ExtractValue(tbl, "MacOS", "worker_shutdown_timeout", osSpecificConfig.workerShutdownTimeout);
+        ExtractValue(tbl, "MacOS", "backlog",                 osSpecificConfig.backlog);
+        ExtractValue(tbl, "MacOS.Kqueue", "max_events",       osSpecificConfig.maxEvents);
     #else
         ExtractValue(tbl, "Linux", "worker_processes",        osSpecificConfig.workerProcesses);
         ExtractValue(tbl, "Linux", "worker_shutdown_timeout", osSpecificConfig.workerShutdownTimeout);
         ExtractValue(tbl, "Linux", "backlog",                 osSpecificConfig.backlog);
-        
+
         #ifdef WFX_LINUX_USE_IO_URING
             ExtractValue(tbl, "Linux.IoUring", "accept_slots",    osSpecificConfig.acceptSlots);
             ExtractValue(tbl, "Linux.IoUring", "queue_depth",     osSpecificConfig.queueDepth);
             ExtractValue(tbl, "Linux.IoUring", "batch_size",      osSpecificConfig.batchSize);
             ExtractValue(tbl, "Linux.IoUring", "file_chunk_size", osSpecificConfig.fileChunkSize);
         #else
-            ExtractValue(tbl, "Linux.Epoll", "max_events", osSpecificConfig.maxEvents);
-        #endif // WFX_LINUX_USE_IO_URING
+            ExtractValue(tbl, "Linux.Epoll", "max_events",        osSpecificConfig.maxEvents);
+        #endif
     #endif // _WIN32
 
         // vvv Misc vvv

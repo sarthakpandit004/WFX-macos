@@ -72,6 +72,9 @@ file(GLOB_RECURSE WFX_UTILS_SOURCES       "${CMAKE_CURRENT_SOURCE_DIR}/utils/*.c
 filter_sources_by_os(WFX_OS_SPECIFIC_SOURCES)
 filter_sources_by_os(WFX_UTILS_SOURCES)
 
+if(APPLE)
+    list(APPEND WFX_UTILS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/utils/fileops/linux/filemanip.cpp")
+endif()
 # -----------------------------
 # Engine executable target
 # -----------------------------
@@ -127,11 +130,14 @@ target_compile_options(wfx PRIVATE
 # Linker options
 # -----------------------------
 target_link_options(wfx PRIVATE
-    # Release (GCC / Clang / AppleClang / Intel)
-    $<$<AND:$<CONFIG:Release>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:IntelLLVM>>>:
-        -Wl,--gc-sections -Wl,--as-needed -Wl,-s -flto=auto
+    # Release — Linux (GCC / Clang / Intel)
+    $<$<AND:$<CONFIG:Release>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:IntelLLVM>>>:
+        -Wl,--gc-sections -Wl,--as-needed -flto=auto
     >
-
+    # Release — macOS (AppleClang)
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:AppleClang>>:
+        -Wl,-dead_strip -flto=auto
+    >
     # Release (MSVC)
     $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:
         /LTCG /OPT:REF /OPT:ICF

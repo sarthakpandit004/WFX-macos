@@ -17,6 +17,7 @@
 #endif // _WIN32
 
 #include <cstdint>
+#include <cstddef>  
 
 namespace WFX::Http {
 

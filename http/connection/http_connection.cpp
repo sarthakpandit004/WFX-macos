@@ -135,6 +135,7 @@ void ConnectionContext::ClearContext()
     streamChunked         = 0;
     expectedBodyLength    = 0;
     trackBytes            = 0;
+
     fileInfo              = FileInfo{};
     asyncData             = AsyncData{};
     clientContext         = nullptr;

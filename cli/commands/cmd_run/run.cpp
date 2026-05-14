@@ -14,16 +14,19 @@
 #ifdef _WIN32
     #include <windows.h>
 #else
-    #include <wait.h>
+    #include <sys/wait.h>
+    #include <unistd.h>
     #include <signal.h>
 #endif
+#include <memory>
 #include <thread>
+#include <vector>
 
 namespace WFX::CLI {
 
-using namespace WFX::Http;  // For 'WFXGlobalState', ...
-using namespace WFX::Utils; // For 'Logger', 'BufferPool', 'FileCache', ...
-using namespace WFX::Core;  // For 'Config', 'TemplateEngine'
+using namespace WFX::Http;
+using namespace WFX::Utils;
+using namespace WFX::Core;
 
 int RunServer(const std::string& project, const ServerConfig& cfg)
 {
@@ -33,11 +36,9 @@ int RunServer(const std::string& project, const ServerConfig& cfg)
     auto& osConfig    = config.osSpecificConfig;
     auto& buildConfig = config.buildConfig;
 
-    // Sanity check project directory existence
-    if(!FileSystem::DirectoryExists(project.c_str())) 
+    if(!FileSystem::DirectoryExists(project.c_str()))
         logger.Fatal("[WFX]: '", project, "' directory does not exist");
 
-    // Create directory for logs if not exists
     const std::string crashLogDir = project + "/" + config.miscConfig.crashLogDir;
     if(!FileSystem::DirectoryExists(crashLogDir.c_str()) && !FileSystem::CreateDirectory(crashLogDir))
         logger.Fatal("[WFX]: Failed to create '", crashLogDir, "' directory for crash dumps");
@@ -57,10 +58,11 @@ int RunServer(const std::string& project, const ServerConfig& cfg)
         logger.Info("[WFX-Master]: Loaded '.env' successfully");
 
     // -------------------- INITIALIZING PHASE --------------------
-    signal(SIGINT, HandleMasterSignal);
+    signal(SIGINT,  HandleMasterSignal);
     signal(SIGTERM, HandleMasterSignal);
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGHUP,  SIG_IGN);
 
-    // Handle initialization of SSL key before we do anything else
     if(!RandomPool::GetInstance().GetBytes(globalState.sslKey.data(), globalState.sslKey.size()))
         logger.Fatal("[WFX-Master]: Failed to initialize SSL key");
 
@@ -70,21 +72,17 @@ int RunServer(const std::string& project, const ServerConfig& cfg)
     auto& templateEngine = TemplateEngine::GetInstance();
     auto [success, hasDynamic] = templateEngine.PreCompileTemplates();
 
-    // Compile only user source
     if(!success || !hasDynamic)
         HandleUserCxxCompilation(CxxCompilationOption::SOURCE_ONLY);
-    // Compile both source + templates
     else
         HandleUserCxxCompilation();
 
-    // Load template library if it exists
     templateEngine.LoadDynamicTemplatesFromLib();
 
     bool pinToCpu = cfg.GetFlag(ServerFlags::PIN_TO_CPU);
     bool useHttps = cfg.GetFlag(ServerFlags::USE_HTTPS);
     bool ohp      = cfg.GetFlag(ServerFlags::OVERRIDE_HTTPS_PORT);
 
-    // Switch ports if we enable https and we don't want to override https default port
     std::uint16_t port = useHttps && !ohp ? 443U : cfg.port;
 
     logger.Info("[WFX-Master]: Dev server running at ", useHttps ? "https://" : "http://", cfg.host, ':', port);
@@ -92,34 +90,110 @@ int RunServer(const std::string& project, const ServerConfig& cfg)
     logger.SetLevelMask(WFX_LOG_INFO | WFX_LOG_WARNINGS);
 
     // -------------------- WORKERS SPAWNING PHASE --------------------
+#ifdef __APPLE__
+    const std::string dllDir = buildConfig.buildDir + "/user_entry.dylib";
+#else
     const std::string dllDir = buildConfig.buildDir + "/user_entry.so";
-    for(int i = 0; i < osConfig.workerProcesses; i++) {
+#endif
+
+#ifdef __APPLE__
+    // ----------------------------------------------------------------
+    // macOS: SO_REUSEPORT does NOT load-balance across processes —
+    // the kernel pins all connections to one process.
+    // Fix: all workers run as threads in ONE process, each with their own
+    // kqueue fd.  The kernel distributes new connections across them.
+    //
+    // Route registration fix:
+    //   dlopen() with RTLD_GLOBAL is reference-counted — it returns the same
+    //   handle every time for the same path.  RegisterMasterAPI in the user
+    //   DLL has a "static bool registered" guard that makes every call after
+    //   the first a no-op.  If each engine tried to register routes into its
+    //   own router, engines 1..N would always get empty routers → 100% 404.
+    //
+    //   Fix: engine 0 uses the full constructor (loads DLL, registers routes,
+    //   loads middleware once).  Engines 1..N use the worker constructor which
+    //   receives engine 0's shared_ptr<Router> and shared_ptr<Middleware> —
+    //   routes are registered exactly once and all engines read the same
+    //   immutable trie concurrently (safe: read-only after construction).
+    // ----------------------------------------------------------------
+    {
+        BufferPool::GetInstance().Init(1024 * 1024, [](std::size_t curSize) { return curSize * 2; });
+        FileCache::GetInstance().Init(config.miscConfig.fileCacheSize);
+        CrashTracer::Install(crashLogDir.c_str());
+
+        std::uint32_t numWorkers = osConfig.workerProcesses;
+        logger.Info("[WFX-Master]: Spawning ", numWorkers, " worker threads (macOS thread mode)");
+
+        std::vector<std::unique_ptr<CoreEngine>> engines;
+        engines.reserve(numWorkers);
+
+        // --- Engine 0: full init (loads DLL, registers routes) ---
+        engines.push_back(std::make_unique<CoreEngine>(dllDir.c_str(), useHttps));
+        globalState.enginePtr = engines[0].get();
+
+        // --- Engines 1..N: share engine 0's router + middleware ---
+        auto sharedRouter     = engines[0]->GetRouter();
+        auto sharedMiddleware = engines[0]->GetMiddleware();
+
+        for(std::uint32_t i = 1; i < numWorkers; i++)
+            engines.push_back(
+                std::make_unique<CoreEngine>(sharedRouter, sharedMiddleware, useHttps));
+
+        // --- Spawn worker threads (only Listen(), no construction) ---
+        std::vector<std::thread> workers;
+        workers.reserve(numWorkers);
+
+        for(std::uint32_t i = 0; i < numWorkers; i++) {
+            workers.emplace_back([&engines, &cfg, port, pinToCpu, i]() {
+                if(pinToCpu)
+                    PinWorkerToCPU(i);
+                engines[i]->Listen(cfg.host, port);
+            });
+        }
+
+        // Wait for stop signal
+        while(!globalState.shouldStop)
+            pause();
+
+        logger.Info("[WFX-Master]: Signal received, stopping worker threads...");
+
+        for(auto& e : engines)
+            e->Stop();
+
+        for(auto& t : workers) {
+            if(t.joinable())
+                t.join();
+        }
+    }
+
+#else
+    // ----------------------------------------------------------------
+    // Linux: fork() + SO_REUSEPORT works correctly, keep existing logic
+    // ----------------------------------------------------------------
+    for(int i = 0; i < (int)osConfig.workerProcesses; i++) {
         pid_t pid = fork();
 
-        // --- Child Worker ---
         if(pid == 0) {
             if(i == 0)
-                setpgid(0, 0);          // First worker becomes group leader
+                setpgid(0, 0);
             else
-                setpgid(0, globalState.workerPGID); // Join first worker's group
+                setpgid(0, globalState.workerPGID);
 
-            // Same as below, every process will have its own crash tracer
             char workerName[32];
             std::snprintf(workerName, sizeof(workerName), "worker-%d", i);
             CrashTracer::SetWorkerName(workerName);
             CrashTracer::Install(crashLogDir.c_str());
 
-            // For every process initialize its own BufferPool and FileCache
             BufferPool::GetInstance().Init(1024 * 1024, [](std::size_t curSize) { return curSize * 2; });
             FileCache::GetInstance().Init(config.miscConfig.fileCacheSize);
 
-            Core::CoreEngine engine{dllDir.c_str(), useHttps};
+            CoreEngine engine{dllDir.c_str(), useHttps};
             globalState.enginePtr = &engine;
 
             signal(SIGTERM, HandleWorkerSignal);
-            signal(SIGINT, SIG_IGN);  // SigTerm will kill it, SigInt handled by master
-            signal(SIGPIPE, SIG_IGN); // We will handle it internally
-            signal(SIGHUP, SIG_IGN);  // Terminals should not kill workers
+            signal(SIGINT,  SIG_IGN);
+            signal(SIGPIPE, SIG_IGN);
+            signal(SIGHUP,  SIG_IGN);
 
             if(pinToCpu)
                 PinWorkerToCPU(i);
@@ -127,53 +201,43 @@ int RunServer(const std::string& project, const ServerConfig& cfg)
             engine.Listen(cfg.host, port);
             return 0;
         }
-
-        // --- Master ---
         else if(pid > 0) {
             globalState.workerPids.push_back(pid);
             if(i == 0)
-                globalState.workerPGID = pid; // Store PGID for process group
-
+                globalState.workerPGID = pid;
             setpgid(pid, globalState.workerPGID);
         }
-
         else {
             logger.Error("[WFX-Master]: Failed to fork worker ", i);
             return 1;
         }
     }
 
-    // --- Master ---
     while(!globalState.shouldStop)
         pause();
 
     logger.Info("[WFX-Master]: Signal received (INT / TERM), waiting for workers to shutdown...");
 
-    // -------------------- SHUTDOWN PHASE --------------------
     for(std::uint32_t i = 0; i < osConfig.workerProcesses; i++) {
         pid_t pid    = globalState.workerPids[i];
         bool  exited = false;
 
         for(std::uint32_t t = 0; t < config.osSpecificConfig.workerShutdownTimeout * 10; t++) {
-            int status;
+            int   status;
             pid_t ret = waitpid(pid, &status, WNOHANG);
 
-            // Worker exited normally
-            if(ret == pid) {
-                exited = true;
-                break;
-            }
+            if(ret == pid) { exited = true; break; }
 
-            // Poll every 100ms
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
         if(!exited) {
-            // Worker didn't exit in time, force kill
             kill(pid, SIGKILL);
-            waitpid(pid, nullptr, 0); // Reap zombie
+            waitpid(pid, nullptr, 0);
         }
     }
+#endif // __APPLE__
+
 #endif // _WIN32
 
     logger.Info("[WFX-Master]: Shutdown successfully");

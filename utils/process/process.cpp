@@ -8,9 +8,10 @@
     #include <sys/wait.h>
     #include <cerrno>
 #endif
-
+#if defined(__APPLE__)
+    extern char** environ;  // not automatically declared on macOS
+#endif
 namespace WFX::Utils {
-
 namespace ProcessUtils {
 
 ProcessResult RunProcess(std::string& cmd, const std::string& workingDirectory)

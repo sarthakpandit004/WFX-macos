@@ -365,12 +365,21 @@ public: // vvv Number parsing vvv
         const char* begin = src + start;
         const char* end   = src + pos;
 
-        if(isFloat) {
-            double v;
-            if(std::from_chars(begin, end, v).ec != std::errc{}) {
-                Fail("invalid number");
-                return false;
-            }
+       if(isFloat) {
+    double v;
+#if defined(__APPLE__)
+    char* endPtr;
+    v = std::strtod(begin, &endPtr);
+    if(endPtr != end) {
+        Fail("invalid number");
+        return false;
+    }
+#else
+    if(std::from_chars(begin, end, v).ec != std::errc{}) {
+        Fail("invalid number");
+        return false;
+    }
+#endif
 
             n.tag = JsonTag::DOUBLE;
             std::memcpy(&n.u64a, &v, 8);

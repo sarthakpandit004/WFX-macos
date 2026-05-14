@@ -3,6 +3,7 @@
 #include "utils/logger/logger.hpp"
 #include <cstring>
 #include <bit>
+#include <algorithm>
 
 // Some OS level tools for randomization
 #if defined(_WIN32)
@@ -122,9 +123,19 @@ bool RandomPool::RefillBytes()
 #if defined(_WIN32)
     if(BCryptGenRandom(nullptr, randomPool_, static_cast<ULONG>(BUFFER_SIZE), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
         return false;
-#else
-    ssize_t totalRead = 0;
 
+#elif defined(__APPLE__)
+    // macOS: use getentropy (reads up to 256 bytes at a time)
+    ssize_t totalRead = 0;
+    while(totalRead < BUFFER_SIZE) {
+        size_t chunk = std::min<size_t>(256, BUFFER_SIZE - totalRead);
+        if(getentropy(randomPool_ + totalRead, chunk) != 0)
+            return false;
+        totalRead += chunk;
+    }
+#else
+    // Linux: getrandom
+    ssize_t totalRead = 0;
     while(totalRead < BUFFER_SIZE) {
         ssize_t n = getrandom(randomPool_ + totalRead, BUFFER_SIZE - totalRead, 0);
         if(n < 0) {
@@ -133,7 +144,6 @@ bool RandomPool::RefillBytes()
                 int fd = open("/dev/urandom", O_RDONLY);
                 if(fd < 0)
                     return false;
-
                 ssize_t r;
                 ssize_t readTotal = 0;
                 while(readTotal < BUFFER_SIZE) {
@@ -147,10 +157,8 @@ bool RandomPool::RefillBytes()
                 close(fd);
                 break;
             }
-            // Interrupted syscall
             else if(errno == EINTR)
                 continue;
-            
             else
                 return false;
         }

@@ -6,7 +6,7 @@
 #include "utils/crypt/string.hpp"
 #include <cstring>
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     #include <dlfcn.h>
 #endif
 

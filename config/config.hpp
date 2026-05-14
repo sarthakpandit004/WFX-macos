@@ -84,7 +84,7 @@ struct OSSpecificConfig {
         std::uint32_t queueDepth      = 4096;
         std::uint32_t fileChunkSize   = 64 * 1024;
     #else
-        std::uint16_t maxEvents       = 1 * 1024;
+        std::uint16_t maxEvents       = 4 * 1024; // was 1*1024
     #endif // WFX_LINUX_USE_IO_URING
 #endif // _WIN32
 };

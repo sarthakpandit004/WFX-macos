@@ -492,7 +492,7 @@ void CrashTracer::PosixHandler(int sig, siginfo_t* info, void* uctx) noexcept
     long long epoch = GetEpochNow();
 
     char path[320];
-    BuildLogPath(path, sizeof(path), epoch);
+   CrashTracer::BuildLogPath(path, sizeof(path), epoch);
 
     int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if(fd < 0) fd = STDERR_FILENO;
@@ -505,7 +505,7 @@ void CrashTracer::PosixHandler(int sig, siginfo_t* info, void* uctx) noexcept
     // Restore default and re-raise so OS can write core dump
     struct sigaction sa{};
     sa.sa_handler = SIG_DFL;
-    ::sigemptyset(&sa.sa_mask);
+    sigemptyset(&sa.sa_mask);
     ::sigaction(sig, &sa, nullptr);
     ::raise(sig);
 }
@@ -520,7 +520,7 @@ void CrashTracer::InstallPosix() noexcept
     struct sigaction sa{};
     sa.sa_sigaction = PosixHandler;
     sa.sa_flags     = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND;
-    ::sigemptyset(&sa.sa_mask);
+    sigemptyset(&sa.sa_mask);
 
     ::sigaction(SIGSEGV, &sa, nullptr);
     ::sigaction(SIGABRT, &sa, nullptr);

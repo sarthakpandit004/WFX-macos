@@ -158,9 +158,9 @@ void TimerWheel::Tick(std::uint64_t nowTick)
             std::uint32_t extra = m.extra;
             std::uint32_t next  = m.next;
 
-            if(m.rounds == 0) {
-                onExpire_(curr, extra);
+           if(m.rounds == 0) {
                 Unlink(curr);
+                onExpire_(curr, extra);
             }
             else
                 --m.rounds;
@@ -202,6 +202,7 @@ void TimerWheel::Unlink(std::uint32_t pos)
 void TimerWheel::ClearSlot(std::uint32_t pos)
 {
     meta_[pos] = SlotMeta{};
+    meta_[pos].bucket = slots_;
 }
 
 } // namespace WFX::Utils

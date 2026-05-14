@@ -105,7 +105,7 @@ HttpParseState Parse(ConnectionContext* ctx)
 
             // Data should be fetched all at once
             if(hasContentLengthHeader) {
-                std::size_t contentLen = 0;
+                std::uint64_t contentLen = 0;
                 // Malformed Content-Length
                 if(!StrToUInt64(contentLengthHeader, contentLen))
                     return HttpParseState::PARSE_ERROR;

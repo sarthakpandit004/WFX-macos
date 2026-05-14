@@ -160,7 +160,10 @@ struct ConnectionContext : public ConnectionTag {
             std::uint16_t isFileOperation       : 1;  //  |
             std::uint16_t isAsyncTimerOperation : 1;  //  |
             std::uint16_t isShuttingDown        : 1;  //  |
+            std::uint16_t isClosing             : 1;
+            std::uint16_t isReleasing : 1;
             std::uint16_t streamChunked         : 1;  //  V
+            std::uint16_t isPendingWriteEvent  : 1;
         };                                            // 2 bytes
         std::uint16_t __Flags = 0;
     };

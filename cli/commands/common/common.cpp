@@ -9,8 +9,17 @@
 #include "utils/backport/string.hpp"
 
 // Linux
-#ifdef __linux__
+#ifdef _WIN32
+    
+#elif defined(__APPLE__)
+    #include <sys/wait.h>
+    #include <unistd.h>
+    #include <signal.h>
+#else
     #include <wait.h>
+    #include <sched.h>
+    #include <unistd.h>
+    #include <signal.h>
 #endif
 
 namespace WFX::CLI {
@@ -143,18 +152,18 @@ void HandleWorkerSignal(int)
 }
 
 void PinWorkerToCPU(int workerIndex) {
+#ifdef __linux__
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
-
-    int cpu = workerIndex % sysconf(_SC_NPROCESSORS_ONLN); // Round-Robin
-
+    int cpu = workerIndex % sysconf(_SC_NPROCESSORS_ONLN);
     CPU_SET(cpu, &cpuset);
-
     if(sched_setaffinity(0, sizeof(cpuset), &cpuset) < 0)
         Logger::GetInstance().Error("[WFX-Master]: Failed to pin worker ", workerIndex, " to CPU");
-
     Logger::GetInstance().Info("[WFX-Master]: Worker ", workerIndex, " pinned to CPU ", cpu);
+#else
+    // CPU pinning not supported on this platform — no-op
+    (void)workerIndex;
+#endif        
 }
-#endif
-
+#endif      
 } // namespace WFX::CLI

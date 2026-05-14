@@ -13,7 +13,7 @@
 #include "utils/process/process.hpp"
 #include "utils/crash_tracer/crash_tracer.hpp"
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     #include <dlfcn.h>
 #endif
 
@@ -23,6 +23,10 @@ using namespace WFX::Http;
 using namespace WFX::Shared;
 using namespace WFX::Utils;
 
+// Each worker thread sets this at the top of Listen() so OnCoroutineComplete()
+// can find the right engine without touching any shared global state.
+static thread_local CoreEngine* tl_currentEngine = nullptr;
+
 enum ConnectionHeader : std::uint8_t {
     NONE       = 0,
     CLOSE      = 1 << 0,
@@ -31,36 +35,57 @@ enum ConnectionHeader : std::uint8_t {
     ERROR      = 1 << 3,
 };
 
-// vvv Main Functions vvv
+// ---------------------------------------------------------------------------
+// Full constructor (engine 0 only)
+// Allocates fresh Router + Middleware, loads the DLL, registers routes.
+// ---------------------------------------------------------------------------
 CoreEngine::CoreEngine(const char* dllPath, bool useHttps)
+    : router_    (std::make_shared<Http::Router>())
+    , middleware_(std::make_shared<Http::HttpMiddleware>())
 {
     connHandler_ = CreateConnectionHandler(useHttps);
     if(!connHandler_)
         logger_.Fatal("[CoreEngine]: Failed to create connection backend");
 
-    // Initialize API backend before anything else
-    Shared::InitHttpAPIV1(connHandler_.get(), &router_, &middleware_);
+    Shared::InitHttpAPIV1(connHandler_.get(), router_.get(), middleware_.get());
     Shared::InitAsyncAPIV1(connHandler_.get());
-
-    // We set it on our end because each compiled binary has its own copy of '__WFXApi'
-    // If we want it to work on our end, we gotta set it here as well
     SetMasterApi(Shared::GetMasterAPI());
 
-    // Load user's DLL file which we compiled / is cached
     HandleUserDLLInjection(dllPath);
-
-    // Now that user code is available to us, load middleware in proper order
     HandleMiddlewareLoading();
+}
+
+// ---------------------------------------------------------------------------
+// Worker constructor (engines 1..N)
+// Receives engine 0's pre-populated Router and Middleware — no DLL loading,
+// no route registration, no middleware loading.
+// ---------------------------------------------------------------------------
+CoreEngine::CoreEngine(std::shared_ptr<Http::Router>         sharedRouter,
+                       std::shared_ptr<Http::HttpMiddleware>  sharedMiddleware,
+                       bool                                   useHttps)
+    : router_    (std::move(sharedRouter))
+    , middleware_(std::move(sharedMiddleware))
+{
+    connHandler_ = CreateConnectionHandler(useHttps);
+    if(!connHandler_)
+        logger_.Fatal("[CoreEngine]: Failed to create connection backend");
+
+    // Wire this engine's own connHandler into the HTTP API so in-flight
+    // async callbacks resolve correctly on this thread.
+    Shared::InitHttpAPIV1(connHandler_.get(), router_.get(), middleware_.get());
+    Shared::InitAsyncAPIV1(connHandler_.get());
+    SetMasterApi(Shared::GetMasterAPI());
+
+    // Routes already registered into router_, middleware already loaded.
 }
 
 void CoreEngine::Listen(const std::string& host, std::uint16_t port)
 {
-    connHandler_->Initialize(host, port);
+    tl_currentEngine = this;  // pin for OnCoroutineComplete
 
+    connHandler_->Initialize(host, port);
     connHandler_->SetEngineCallback(
-        [this](ConnectionContext* ctx) {
-            this->HandleRequest(ctx);
-        }
+        [this](ConnectionContext* ctx) { this->HandleRequest(ctx); }
     );
     connHandler_->Run();
 }
@@ -72,19 +97,18 @@ void CoreEngine::Stop()
 }
 
 // vvv Internal Functions vvv
+
 void CoreEngine::HandleRequest(ConnectionContext* ctx)
 {
     WFX_TRACE();
 
     auto& networkConfig = config_.networkConfig;
 
-    // Allocate response once per connection, reused across requests via Reset()
     if(!ctx->responseInfo)
         ctx->responseInfo = new HttpResponse{};
 
     auto& res = *ctx->responseInfo;
 
-    // Main shit
     HttpParseState state = HttpParser::Parse(ctx);
 
     switch(state) {
@@ -110,37 +134,26 @@ void CoreEngine::HandleRequest(ConnectionContext* ctx)
 
         case HttpParseState::PARSE_SUCCESS:
         {
-            // After parsing, ctx->trackBytes becomes the compact state register used by-
-            // -'HandleSuccess' for async resumption IF needed that is
-            // For now reset ctx->trackBytes so ctx->trackAsync becomes zeroed out 'HandleSuccess'
             ctx->trackBytes = 0;
 
             auto& reqInfo    = *ctx->requestInfo;
             auto  connHeader = reqInfo.headers.GetHeader("Connection");
             auto  connMask   = HandleConnectionHeader(connHeader);
 
-            // RFC violation, close connection
             if(connMask & ConnectionHeader::ERROR) {
                 ctx->SetConnectionState(ConnectionState::CONNECTION_CLOSE);
                 connHandler_->Write(ctx, HttpError::badRequest);
                 return;
             }
 
-            // In this case:
-            // HTTP/1.0: Defaults to close
-            // HTTP/1.1: Defaults to keep-alive
             bool shouldClose = (connMask == ConnectionHeader::NONE)
                                 ? (reqInfo.version == HttpVersion::HTTP_1_0)
                                 : static_cast<bool>(connMask & ConnectionHeader::CLOSE);
 
-            ctx->SetConnectionState(
-                shouldClose
+            ctx->SetConnectionState(shouldClose
                 ? ConnectionState::CONNECTION_CLOSE
-                : ConnectionState::CONNECTION_ALIVE
-            );
+                : ConnectionState::CONNECTION_ALIVE);
 
-            // Wire rwBuffer + version into response before any writes
-            // Write buffer allocated once, reused across requests on same connection
             if(!ctx->rwBuffer.IsWriteInitialized() &&
                !ctx->rwBuffer.InitWriteBuffer(networkConfig.maxSendBufferSize))
             {
@@ -154,17 +167,15 @@ void CoreEngine::HandleRequest(ConnectionContext* ctx)
             res.SetVersion(reqInfo.version);
             res.SetShouldClose(shouldClose);
 
-            // Public file shortcut
             if(StartsWith(reqInfo.path, "/public/")) {
                 std::string_view relativePath = reqInfo.path.substr(7);
                 std::string fullRoute = config_.projectConfig.publicDir + std::string(relativePath);
-
                 res.SendFile(fullRoute, true);
                 goto __HandleResponse;
             }
 
             {
-                auto node = router_.MatchRoute(reqInfo.method, reqInfo.path, reqInfo.pathSegments);
+                auto node = router_->MatchRoute(reqInfo.method, reqInfo.path, reqInfo.pathSegments);
                 if(!node) {
                     HandleError(ctx, HttpStatus::NOT_FOUND, "404: Route not found :(");
                     goto __HandleResponse;
@@ -200,7 +211,6 @@ void CoreEngine::HandleResponse(ConnectionContext* ctx)
 
     HttpResponse& res = *ctx->responseInfo;
 
-    // Sanity checks
     if(!res.IsCommitted())
         res.Commit();
 
@@ -214,7 +224,6 @@ void CoreEngine::HandleResponse(ConnectionContext* ctx)
         return;
     }
 
-    // 'rwBuffer' already has the full serialized wire response, just write that
     connHandler_->Write(ctx, {});
 }
 
@@ -236,10 +245,9 @@ void CoreEngine::HandleSuccess(ConnectionContext* ctx)
         goto __HandleResponse;
 
     if(eLevel == ExecutionLevel::MIDDLEWARE) {
-        auto [success, isAsync, isBroken] = middleware_.ExecuteMiddleware(ctx, node, userReq, userRes);
+        auto [success, isAsync, isBroken] = middleware_->ExecuteMiddleware(ctx, node, userReq, userRes);
 
         if(!success) {
-            // Middleware returned MwBreak. Assuming it sent response (it should), finish the request
             if(isBroken)
                 goto __HandleResponse;
 
@@ -249,35 +257,20 @@ void CoreEngine::HandleSuccess(ConnectionContext* ctx)
                 goto __HandleResponse;
             }
 
-            // Async middleware, coroutine will fire 'OnCoroutineComplete' when done
             FinishRequest(ctx);
             return;
         }
 
-        // Update 'eLevel' to be 'RESPONSE' level so the next time this shits called, we-
-        // -directly jump to '__HandleResponse'
         ctx->trackAsync.SetELevel(ExecutionLevel::RESPONSE);
     }
 
-    // Sync, execute it right now
     if(node->callback.kind == CallbackKind::SYNC)
         node->callback.sync(userReq, userRes);
-
-    // Async, check if we have executed it entirely right now, if not-
-    // -schedule it for later
     else {
-        // Set context (type erased) at http api side before calling async callback
-        // And also erase it after callback is done, if the callback hasn't finished, the-
-        // -scheduler will set the ptr later on when needed, no need to keep a dangling pointer
         httpApi->SetGlobalPtrData(static_cast<void*>(ctx));
-
         node->callback.async(userReq, userRes, CoreEngine::OnCoroutineComplete, ctx);
-
         httpApi->SetGlobalPtrData(nullptr);
 
-        // If the coroutine already completed synchronously ('final_suspend' already fired the callback),-
-        // -the response is already handled
-        // If still suspended, it will fire later. Either way, we are done here
         FinishRequest(ctx);
         return;
     }
@@ -288,27 +281,22 @@ __HandleResponse:
 }
 
 // vvv Helper Functions vvv
+
 void CoreEngine::OnCoroutineComplete(void* ud, AsyncResult result)
 {
     auto* ctx    = static_cast<ConnectionContext*>(ud);
-    auto* engine = GetGlobalState().enginePtr;
+    auto* engine = tl_currentEngine;  // thread-local — always the right engine
 
     if(result.status != AsyncStatus::COMPLETED) {
         ctx->SetConnectionState(ConnectionState::CONNECTION_CLOSE);
         engine->HandleError(ctx, HttpStatus::INTERNAL_SERVER_ERROR, "Async Failure");
     }
-
-    // If this was middleware, inject the action into the pipeline
     else if(ctx->trackAsync.GetELevel() == ExecutionLevel::MIDDLEWARE) {
         *ctx->trackAsync.GetMAction() = result.action;
-
-        // Re-enter 'HandleSuccess' to run the route or more middlewares
-        // This is safe because the current coroutine frame is already destroyed
         engine->HandleSuccess(ctx);
         return;
     }
 
-    // Route completed, serialize and send
     engine->HandleResponse(ctx);
 }
 
@@ -321,8 +309,6 @@ void CoreEngine::FinishRequest(ConnectionContext* ctx)
 void CoreEngine::HandleError(ConnectionContext* ctx, Shared::HttpStatus code, std::string_view message)
 {
     auto& res = *ctx->responseInfo;
-
-    // Reset the should close because it may have changed since
     res.SetShouldClose(ctx->GetConnectionState() == ConnectionState::CONNECTION_CLOSE);
     res.AbortWithError(code, message);
 }
@@ -334,39 +320,27 @@ std::uint8_t CoreEngine::HandleConnectionHeader(std::string_view header)
     std::size_t  size  = header.size();
 
     while(start < size) {
-        // Find comma
         std::size_t end = header.find(',', start);
         if(end == std::string_view::npos)
             end = size;
 
-        // Extract token substring trimming leading and trailing spaces / tabs
         std::string_view token = TrimView(header.substr(start, end - start));
 
-        // CLOSE
         if(StringCanonical::InsensitiveStringCompare(token, "close")) {
             if(mask & ConnectionHeader::KEEP_ALIVE)
-                return ConnectionHeader::ERROR; // Mutually exclusive
-
+                return ConnectionHeader::ERROR;
             mask |= ConnectionHeader::CLOSE;
         }
-
-        // KEEP-ALIVE
         else if(StringCanonical::InsensitiveStringCompare(token, "keep-alive")) {
             if(mask & ConnectionHeader::CLOSE)
-                return ConnectionHeader::ERROR; // Mutually exclusive
-
+                return ConnectionHeader::ERROR;
             mask |= ConnectionHeader::KEEP_ALIVE;
         }
-
-        // UPGRADE
         else if(StringCanonical::InsensitiveStringCompare(token, "upgrade"))
             mask |= ConnectionHeader::UPGRADE;
-
-        // UNKNOWN
         else
             return ConnectionHeader::ERROR;
 
-        // Move to next token
         start = end + 1;
     }
 
@@ -376,7 +350,6 @@ std::uint8_t CoreEngine::HandleConnectionHeader(std::string_view header)
 void CoreEngine::HandleUserDLLInjection(const char* dllPath)
 {
 #if defined(_WIN32)
-    // Windows
     HMODULE userModule = LoadLibraryA(dllPath);
     if(!userModule) {
         DWORD err = GetLastError();
@@ -391,18 +364,14 @@ void CoreEngine::HandleUserDLLInjection(const char* dllPath)
         return;
     }
 
-    // Cast to your function type
     auto registerFn = reinterpret_cast<Shared::RegisterMasterAPIFn>(rawProc);
 #else
-    // POSIX (Linux / macOS / *nix)
-    // RTLD_NOW: resolve symbols immediately; RTLD_GLOBAL: let module export symbols globally if needed
     void* handle = dlopen(dllPath, RTLD_NOW | RTLD_GLOBAL);
     if(!handle) {
         const char* err = dlerror();
         logger_.Fatal("[CoreEngine]: ", dllPath, " dlopen failed: ", (err ? err : "unknown error"));
     }
 
-    // Clear any existing error
     dlerror();
     void* rawSym = dlsym(handle, "RegisterMasterAPI");
     const char* dlsymErr = dlerror();
@@ -412,20 +381,14 @@ void CoreEngine::HandleUserDLLInjection(const char* dllPath)
 
     auto registerFn = reinterpret_cast<Shared::RegisterMasterAPIFn>(rawSym);
 #endif
-    // Call into the user module to inject the API
     registerFn(Shared::GetMasterAPI());
     logger_.Info("[CoreEngine]: Successfully injected API and initialized user module: ", dllPath);
 }
 
 void CoreEngine::HandleMiddlewareLoading()
 {
-    middleware_.LoadMiddlewareFromConfig(config_.projectConfig.middlewareList);
-
-    // After we load the middleware, we no longer need the map thingy as all the stuff is properly loaded-
-    // -inside of middlewareCallbacks_ stack
-    // K I L L
-    // I T
-    middleware_.DiscardFactoryMap();
+    middleware_->LoadMiddlewareFromConfig(config_.projectConfig.middlewareList);
+    middleware_->DiscardFactoryMap();
 }
 
 } // namespace WFX::Core
