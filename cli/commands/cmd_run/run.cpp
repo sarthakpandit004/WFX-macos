@@ -96,7 +96,7 @@ int RunServer(const std::string& project, const ServerConfig& cfg)
     const std::string dllDir = buildConfig.buildDir + "/user_entry.so";
 #endif
 
-#ifdef __APPLE__
+#if 0 && defined(__APPLE__)
     // ----------------------------------------------------------------
     // macOS: SO_REUSEPORT does NOT load-balance across processes —
     // the kernel pins all connections to one process.

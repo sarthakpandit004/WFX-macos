@@ -60,6 +60,7 @@ using WriteBodyFn     = void (*)(void* response, StringView data);
 using WriteFileFn     = void (*)(void* response, StringView path, bool autoHandle404);
 using WriteStreamFn   = void (*)(void* response, StreamGenerator, bool chunked);
 using WriteTemplateFn = void (*)(void* response, StringView path, JsonObject* ctx);
+using SendTextFn      = void (*)(void* response, StringView data);
 using CommitFn        = void (*)(void* response);
 
 // Endpoint API
@@ -104,6 +105,7 @@ struct HTTP_API_TABLE {
     WriteFileFn             WriteFile;
     WriteStreamFn           WriteStream;
     WriteTemplateFn         WriteTemplate;
+    SendTextFn              SendText;
     CommitFn                Commit;
 
     // Endpoint API

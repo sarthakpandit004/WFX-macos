@@ -148,7 +148,6 @@ private: // Connection pool (same bitmap design as epoll)
     std::uint32_t  connLastIndex_ = 0;
     std::uint64_t abortedCount_ = 0;
     std::uint64_t fdExhaustedCount_ = 0;
-    // TODO: FOR DEBUG ONLY, REMOVE AFTER
     std::uint64_t numConnectionsAlive_ = 0;
    
 };

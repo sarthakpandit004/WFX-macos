@@ -102,9 +102,7 @@ public: // Sugar syntax
     // Plain text, sets Content-Type, writes, commits
     void SendText(std::string_view data)
     {
-        Header("Content-Type", "text/plain");
-        Write(data);
-        Commit();
+        Core::HttpApi()->SendText(backend_, ToSV(data));
     }
 
     // Zero-copy sendfile path

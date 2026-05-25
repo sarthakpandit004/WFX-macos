@@ -85,7 +85,20 @@ void KqueueConnectionHandler::Initialize(const std::string& host, std::uint16_t 
   
 
     // ---- Create listening socket ----
-    listenFd_ = socket(AF_INET, SOCK_STREAM, 0);
+    // listenFd_ = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_storage addr{};
+        socklen_t addrLen = 0;
+
+        std::string portStr = std::to_string(port);
+
+        if(!ResolveHost(host.c_str(), portStr.c_str(), &addr, &addrLen))
+            logger_.Fatal("[Kqueue]: Failed to resolve host");
+
+        listenFd_ = socket(addr.ss_family, SOCK_STREAM, 0);
+
+        if(listenFd_ < 0)
+            logger_.Fatal("[Kqueue]: Failed to create listening socket");
+
     if(listenFd_ < 0)
         logger_.Fatal("[Kqueue]: Failed to create listening socket: ", strerror(errno));
 
@@ -96,14 +109,11 @@ void KqueueConnectionHandler::Initialize(const std::string& host, std::uint16_t 
     // NOTE: SO_REUSEPORT exists on macOS too, keep it.
     if(setsockopt(listenFd_, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
         logger_.Fatal("[Kqueue]: Failed to set SO_REUSEPORT: ", strerror(errno));
+    setsockopt(listenFd_, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
 
     if(!SetNonBlocking(listenFd_))
         logger_.Fatal("[Kqueue]: Failed to make listening socket non-blocking: ", strerror(errno));
-    sockaddr_storage addr{};
-    socklen_t        addrLen = 0;
-    std::string      portStr = std::to_string(port);
-    if(!ResolveHost(host.c_str(), portStr.c_str(), &addr, &addrLen))
-        logger_.Fatal("[Kqueue]: Failed to resolve host '", host, '\'');
+   
     if(bind(listenFd_, (sockaddr*)&addr, addrLen) < 0)
         logger_.Fatal("[Kqueue]: Failed to bind socket: ", strerror(errno));
     if(listen(listenFd_, osConfig.backlog) < 0)
@@ -158,6 +168,7 @@ void KqueueConnectionHandler::ResumeReceive(ConnectionContext* ctx)
 {
     if(!EnsureReadReady(ctx))
         return;
+
     ctx->eventType = EventType::EVENT_RECV;
     struct kevent ev{};
     void* udata = reinterpret_cast<void*>(
@@ -368,7 +379,11 @@ void KqueueConnectionHandler::Run()
             // Listen socket — accept new connections
             // ----------------------------------------------------------------
             if((int)ev.ident == listenFd_) {
-                while(true) {
+               constexpr int MAX_ACCEPTS_PER_WAKE = 32;
+
+for(int acceptCount = 0;
+    acceptCount < MAX_ACCEPTS_PER_WAKE;
+    ++acceptCount) {
                     sockaddr_storage clientAddr{};
                     socklen_t addrLen = sizeof(clientAddr);
 
@@ -530,6 +545,9 @@ void KqueueConnectionHandler::Run()
 
 void KqueueConnectionHandler::RefreshExpiry(ConnectionContext* ctx, std::uint16_t timeoutSeconds)
 {
+    if(timeoutSeconds == 0)
+        return;
+
     std::uint32_t idx = connections_.GetIndex(ctx);
     timerWheel_.Schedule(idx, 0, timeoutSeconds);
 }
@@ -620,41 +638,43 @@ void KqueueConnectionHandler::ReleaseConnection(ConnectionContext* ctx, bool isE
 
     numConnectionsAlive_--;
 
-    std::uint32_t idx = connections_.GetIndex(ctx);
+    auto& pool = ctx->IsEndpoint()
+                    ? endpoints_[ctx->endpointIdx].second
+                    : connections_;
+    std::uint32_t idx = pool.GetIndex(ctx);
+
     timerWheel_.Cancel(idx);
 
-    if(ctx->isAsyncTimerOperation) {
+    if(!ctx->IsEndpoint() && ctx->isAsyncTimerOperation) {
         if(!timerHeap_.Remove(idx))
             logger_.Warn("[Kqueue]: Failed to cancel async timer");
         else
             UpdateAsyncTimer();
     }
 
-    if(ctx->socket > 0)
-{
-    struct kevent evs[2];
+    if(!ctx->IsEndpoint()) {
+        HandleAsyncCallback(ctx, {}, true);
 
-    EV_SET(&evs[0], ctx->socket, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
-    EV_SET(&evs[1], ctx->socket, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
+        if(ctx->endpointContext)
+            Close(ctx->endpointContext, true);
 
-    kevent(kqFd_, evs, 2, nullptr, 0, nullptr);
+        ipLimiter_.ReleaseConnection(ctx->connInfo);
+    }
+    else if(ctx->clientContext) {
+        HandleAsyncCallback(ctx->clientContext, {
+            nullptr, 0,
+            Shared::MiddlewareAction::CONTINUE,
+            Shared::AsyncStatus::IO_FAILURE
+        }, false);
+    }
 
-    ::shutdown(ctx->socket, SHUT_RDWR);
-    ::close(ctx->socket);
-
-    ctx->socket = -1;
-}
-
-
-    ipLimiter_.ReleaseConnection(ctx->connInfo);
-
-    ipLimiter_.ReleaseConnection(ctx->connInfo);
-
-ctx->socket = -1;
-
-ctx->ResetContext();
+    if(ctx->socket > 0) {
+        ::close(ctx->socket);
+        ctx->socket = WFX_INVALID_SOCKET;
+    }
 
     ctx->ResetContext();
+    pool.FreeSlot(idx);
 }
 
 // =============================================================================

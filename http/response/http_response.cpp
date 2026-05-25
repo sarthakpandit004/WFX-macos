@@ -78,6 +78,7 @@ void HttpResponse::Reset()
     clOffset_        = 0;
     bodyStartOffset_ = 0;
     clNeeded_        = false;
+    shouldClose_     = false;
 
     if(rwBuffer_)
         rwBuffer_->ClearWriteBuffer();
@@ -318,6 +319,7 @@ void HttpResponse::Commit()
         if(base)
             std::memcpy(base + clOffset_, tmp, CL_FIELD_WIDTH);
     }
+    
 
     phase_ = ResponsePhase::COMMITTED;
 }
@@ -325,12 +327,31 @@ void HttpResponse::Commit()
 // vvv Sugar Syntax vvv
 void HttpResponse::SendText(std::string_view data)
 {
+    FatalIfCommitted("SendText");
+
+    if(bodyKind_ != BodyKind::NONE)
+        Logger::GetInstance().Fatal("[HttpResponse]: 'SendText()' called after body kind already set");
+
+    if(StatusForbidsBody(status_))
+        Logger::GetInstance().Fatal(
+            "[HttpResponse]: Text body not allowed for this status code [1xx, 204 and 304]"
+        );
+
     EnsureHeadersOpen();
     Append("Content-Type: text/plain\r\n", 26);
-    phase_ = ResponsePhase::HEADERS;
 
-    WriteBodyData(data);
-    Commit();
+    char clVal[20];
+    std::uint32_t clLen = FormatUInt64(data.size(), clVal);
+
+    Append("Content-Length: ", 16);
+    Append(clVal, clLen);
+    Append("\r\n\r\n", 4);
+
+    if(!data.empty())
+        Append(data.data(), static_cast<std::uint32_t>(data.size()));
+
+    bodyKind_ = BodyKind::BUFFERED;
+    phase_    = ResponsePhase::COMMITTED;
 }
 
 void HttpResponse::SendFile(std::string_view path, bool autoHandle404)

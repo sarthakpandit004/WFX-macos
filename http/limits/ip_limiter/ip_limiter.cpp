@@ -18,10 +18,12 @@ IpLimiter::IpLimiter(Utils::BufferPool& poolRef)
 
 bool IpLimiter::AllowConnection(const WFXIpAddress &ip)
 {
+    auto& cfg = Config::GetInstance().networkConfig;
+    if(cfg.maxConnectionsPerIp == 0)
+        return true;
+
     auto* entry = ipLimits_.GetOrInsert(NormalizeIp(ip), {});
     if(entry) {
-        auto& cfg = Config::GetInstance().networkConfig;
-
         if(entry->connectionCount >= cfg.maxConnectionsPerIp)
             return false;
 
@@ -37,10 +39,13 @@ bool IpLimiter::AllowConnection(const WFXIpAddress &ip)
 
 bool IpLimiter::AllowRequest(const WFXIpAddress& ip)
 {
+    const auto& cfg = Config::GetInstance().networkConfig;
+    if(cfg.maxTokensPerSecond == 0 || cfg.maxRequestBurstSize == 0)
+        return true;
+
     auto* entry = ipLimits_.Get(NormalizeIp(ip));
     if(entry) {
         const auto now = std::chrono::steady_clock::now();
-        const auto& cfg = Config::GetInstance().networkConfig;
 
         TokenBucket& bucket = entry->bucket;
 
@@ -71,6 +76,9 @@ bool IpLimiter::AllowRequest(const WFXIpAddress& ip)
 
 void IpLimiter::ReleaseConnection(const WFXIpAddress& ip)
 {
+    if(Config::GetInstance().networkConfig.maxConnectionsPerIp == 0)
+        return;
+
     WFXIpAddress key         = NormalizeIp(ip);
     bool         shouldErase = false;
     auto*        entry       = ipLimits_.Get(key);

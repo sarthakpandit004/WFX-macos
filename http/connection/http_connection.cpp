@@ -135,7 +135,8 @@ void ConnectionContext::ClearContext()
     streamChunked         = 0;
     expectedBodyLength    = 0;
     trackBytes            = 0;
-
+    SetParseState(HttpParseState::PARSE_IDLE);
+    SetConnectionState(ConnectionState::CONNECTION_ALIVE);
     fileInfo              = FileInfo{};
     asyncData             = AsyncData{};
     clientContext         = nullptr;

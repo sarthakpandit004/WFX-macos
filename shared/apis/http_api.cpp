@@ -178,6 +178,9 @@ const HTTP_API_TABLE* GetHttpAPIV1()
         [](void* backend, StringView path, Shared::JsonObject* ctx) { // WriteTemplateFn
             ToRes(backend)->WriteTemplate(std::string{path.Data(), path.Size()}, std::move(*ctx));
         },
+        [](void* backend, StringView data) { // SendTextFn
+            ToRes(backend)->SendText(std::string_view{data.Data(), data.Size()});
+        },
         [](void* backend) { // CommitFn
             ToRes(backend)->Commit();
         },
